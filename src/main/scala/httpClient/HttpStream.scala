@@ -4,16 +4,17 @@ package httpClient
   * Created by iyanu on 12/9/16.
   */
 
-import java.io.IOException
 import java.util.concurrent.TimeUnit
 
 import json4sTest.JobState
 import json4sTest.JobState._
-import okhttp3.{Call, Callback, OkHttpClient, Request, Response}
+import okhttp3.{OkHttpClient, Request, Response}
 import okio.{Buffer, BufferedSource}
 import org.json4s.{CustomSerializer, DefaultFormats, JString}
 import org.json4s.JsonAST.JNull
 import org.json4s.jackson.Serialization.read
+
+import util.control.Breaks._
 
 object SparkJobResource {
   case class Metadata(name: String,
@@ -61,20 +62,13 @@ object HttpStream extends App {
   private val httpClient = new OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build()
 
   val request = new Request.Builder().get().url(s"$apiEndpoint?watch=true").build()
-  val response = httpClient.newCall(request).enqueue(new Callback {
 
-    override def onFailure(call: Call, e: IOException): Unit = {
-      throw new IllegalStateException(e.getMessage)
-    }
+  val response = httpClient.newCall(request).execute()
 
-    override def onResponse(call: Call, response: Response): Unit = {
-      response.code() match {
-        case 200 => processResponse(response)
-        case _ => throw new IllegalStateException(s"Application layer failure. ${response.message()}")
-      }
-    }
-  })
-
+  response.code() match {
+    case 200 => processResponse(response)
+    case _ => throw new IllegalStateException("There's fire on the mountain")
+  }
 
   // Implementing the Server Sent Event Logic
   def processResponse(response: Response): Unit = {
@@ -83,20 +77,30 @@ object HttpStream extends App {
 
     // Returns true if there are no more bytes in this source. This will block until there are bytes
     // to read or the source is definitely exhausted.
-    while (!source.exhausted()) {
-      source.read(buffer, 8192) match {
-        case -1 => source.close()
-        case _ =>
-          val watchObject = read[WatchObject](buffer.readUtf8())
-          processResponseUtil(watchObject)
+    breakable {
+      while (!source.exhausted()) {
+        source.read(buffer, 8192) match {
+          case -1 =>
+            cleanUpListener(source, buffer, response)
+            break()
+          case _ =>
+            read[WatchObject](buffer.readUtf8()) match {
+              case WatchObject("DELETED", _) =>
+                println("I should go crazy")
+                cleanUpListener(source, buffer, response)
+                break()
+              case WatchObject(_, _) => println("I don't really care")
+            }
+
+        }
       }
     }
   }
 
-  def processResponseUtil(watchObject: WatchObject): Unit = {
-    watchObject match {
-      case WatchObject("DELETED", _) => println("I should go crazy")
-      case WatchObject(_, _) => println("I don't really care")
-    }
+  def cleanUpListener(source: BufferedSource, buffer: Buffer, response: Response): Unit = {
+    source.close()
+    buffer.close()
+    response.close()
   }
+
 }
