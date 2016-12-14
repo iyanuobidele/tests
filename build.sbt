@@ -22,6 +22,7 @@ libraryDependencies := List(
   "io.circe" %% "circe-parser" % circeV,
   "io.circe" %% "circe-spray" % circeV,
   "org.json4s" %% "json4s-jackson" % "3.5.0",
-  "com.squareup.okhttp3" % "okhttp" % "3.5.0"
+  "com.squareup.okhttp3" % "okhttp" % "3.4.1",
+  "com.squareup.okhttp3" % "okhttp-ws" % "3.4.1"
 )
     
