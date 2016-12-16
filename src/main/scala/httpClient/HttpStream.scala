@@ -82,7 +82,16 @@ object HttpStream extends App {
     case _: Response => throw new IllegalStateException("There's fire on the mountain")
   }
 
+  def doStuff(r: Response): Unit = {
+    val temp = processResponse(r)
+    println("I should see this before the object gets printed")
+    temp onComplete {
+      case Success(w: WatchObject) => println(w)
+      case Failure(e: Throwable) => throw new IllegalStateException(e)
+    }
 
+    Await.result(temp, 1.day)
+  }
 
   // Implementing the Server Sent Event Logic
   def processResponse(response: Response): Future[WatchObject] = {
@@ -112,6 +121,7 @@ object HttpStream extends App {
         }
       }
     }
+    println("This message should be printed first. Since the blocking watcher should go off on a new thread")
     p.future
   }
 
@@ -121,19 +131,6 @@ object HttpStream extends App {
     buffer.close()
     response.close()
     break()
-  }
-
-  def doStuff(r: Response): Unit = {
-    val temp = processResponse(r)
-    println("I should see this before the object gets printed")
-    temp onComplete {
-      case Success(w: WatchObject) =>
-        println("I got here")
-        println(w)
-      case Failure(e: Throwable) => throw new IllegalStateException(e)
-    }
-
-    Await.result(temp, 1.day)
   }
 
   private def executeBlocking[T](cb: => T): Future[T] = {
