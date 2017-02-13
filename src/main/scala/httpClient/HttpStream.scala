@@ -4,20 +4,18 @@ package httpClient
   * Created by iyanu on 12/9/16.
   */
 
-import java.util.concurrent.{Executors, ThreadFactory, TimeUnit}
+import java.util.concurrent.TimeUnit
 
 import json4sTest.JobState
 import json4sTest.JobState._
-import okhttp3.{OkHttpClient, Request, Response}
+import okhttp3.{OkHttpClient, Request, Response, ResponseBody}
 import okio.{Buffer, BufferedSource}
 import org.json4s.{CustomSerializer, DefaultFormats, JString}
 import org.json4s.JsonAST.JNull
 import org.json4s.jackson.Serialization.read
 
-import scala.concurrent.{Future, util => JUtil, _}
-import scala.concurrent.duration._
-import scala.util.{Failure, Success}
-import util.control.Breaks._
+import scala.concurrent.{Future, _}
+import scala.util.control.Breaks._
 
 object SparkJobResource {
   case class Metadata(name: String,
@@ -53,96 +51,77 @@ object SparkJobResource {
 }
 
 
-object HttpStream extends App {
+class HttpStream()(implicit ec: ExecutionContext) {
 
   import SparkJobResource._
 
-  private lazy val blockingThreadPool = Executors.newCachedThreadPool(
-    new ThreadFactory {
-      def newThread(r: Runnable): Thread = {
-        val thread = new Thread(r)
-        thread.setDaemon(true)
-        thread
-      }
-    }
-  )
-
-  private implicit val ec = ExecutionContext.fromExecutorService(blockingThreadPool)
+  // private implicit val ec = ExecutionContext.fromExecutorService(blockingThreadPool)
   private implicit val formats = DefaultFormats + JobStateSerDe
-  private val kind = "SparkJob"
   private val apiVersion = "apache.io/v1"
   private val protocol = "http://"
   private val apiEndpoint = s"${protocol}127.0.0.1:8001/apis/$apiVersion/namespaces/iobidele/sparkjobs"
   private val httpClient = new OkHttpClient.Builder().readTimeout(0, TimeUnit.MILLISECONDS).build()
 
-  val request = new Request.Builder().get().url(s"$apiEndpoint?watch=true").build()
+  val request: Request = new Request.Builder().get().url(s"$apiEndpoint?watch=true").build()
 
-  httpClient.newCall(request).execute() match {
-    case r: Response if r.code() == 200 => doStuff(r)
-    case _: Response => throw new IllegalStateException("There's fire on the mountain")
-  }
+  var resp: Response = _
 
-  def doStuff(r: Response): Unit = {
-    val temp = processResponse(r)
-    println("I should see this before the object gets printed")
-    temp onComplete {
-      case Success(w: WatchObject) => println(w)
-      case Failure(e: Throwable) => throw new IllegalStateException(e)
+  def main(): Future[WatchObject] = {
+    httpClient.newCall(request).execute() match {
+      case r: Response if r.code() == 200 => resp = r
+        processResponse(r)
+      case _: Response => throw new IllegalStateException("There's fire on the mountain")
     }
-
-    Await.result(temp, 1.day)
   }
+
+  var source: ResponseBody = _
 
   // Implementing the Server Sent Event Logic
   def processResponse(response: Response): Future[WatchObject] = {
-    val p = Promise[WatchObject]()
     val buffer = new Buffer()
-    val source: BufferedSource = response.body().source()
+    source = response.body()
+    val v = source.source()
+    @volatile var wo: WatchObject = null
 
     // Returns true if there are no more bytes in this source. This will block until there are bytes
     // to read or the source is definitely exhausted.
     executeBlocking {
       breakable {
-        while (!source.exhausted()) {
-          source.read(buffer, 8192) match {
+        while (!v.exhausted()) {
+          v.read(buffer, 8192) match {
             case -1 =>
-              p tryFailure new IllegalStateException("Source exhausted and object state is unknown")
-              cleanUpListener(source, buffer, response)
-            case _ => val wo = read[WatchObject](buffer.readUtf8())
+              cleanUpListener(v, buffer, response)
+              throw new IllegalStateException("Source exhausted and object state is unknown")
+            case _ =>
+              wo = read[WatchObject](buffer.readUtf8())
               wo match {
-                case WatchObject("DELETED", _) =>
-                  println(wo)
-                  //println("Finally i've been deleted. Cleaning up")
-                  p trySuccess wo
-                  cleanUpListener(source, buffer, response)
-                case WatchObject(_, _) =>
+                case WatchObject("DELETED", _) => cleanUpListener(v, buffer, response)
+                case WatchObject(w, _) => println(s"${Thread.currentThread().getName} $w event still watching")
               }
           }
         }
       }
+      wo
     }
-    println("This message should be printed first. Since the blocking watcher should go off on a new thread")
-    p.future
   }
 
+  def closeSource() = source.close()
 
   def cleanUpListener(source: BufferedSource, buffer: Buffer, response: Response): Unit = {
     source.close()
     buffer.close()
-    response.close()
     break()
   }
 
   private def executeBlocking[T](cb: => T): Future[T] = {
     val p = Promise[T]()
-
-    blockingThreadPool.execute(
+    ec.execute(
       new Runnable {
         override def run(): Unit = {
           try {
             p.trySuccess(blocking(cb))
           } catch {
-            case e: Throwable => println(e.getMessage)
+            case e: Throwable => println(s"${Thread.currentThread().getName} In here: ${e.getMessage}")
               p.tryFailure(e)
           }
         }
